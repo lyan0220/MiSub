@@ -3,7 +3,7 @@
  * Public report endpoint + auth-only management APIs
  */
 
-import { StorageFactory, STORAGE_TYPES } from '../../storage-adapter.js';
+import { StorageFactory, SettingsCache, STORAGE_TYPES } from '../../storage-adapter.js';
 import { createJsonResponse, createErrorResponse, getPublicBaseUrl } from '../utils.js';
 import { sendTgNotification } from '../notifications.js';
 import { KV_KEY_SETTINGS, DEFAULT_SETTINGS } from '../config.js';
@@ -72,18 +72,31 @@ async function writeJsonCache(env, key, value, ttl = PUBLIC_CACHE_TTL_SECONDS) {
     }
 }
 
+/**
+ * Soft delete by overwriting with a very short TTL.
+ * This effectively invalidates the cache without consuming the KV "Delete" quota, 
+ * which is strictly limited to 1,000/day on the free tier.
+ */
 async function deleteJsonCache(env, key) {
     const kv = getKv(env);
     if (!kv) return false;
     try {
-        await kv.delete(key);
+        // Use put with 60s TTL (minimum allowed by KV for expirationTtl is 60s, 
+        // but it effectively hides the data immediately as we'll write an empty string).
+        // Actually, let's just use put with an empty value.
+        await kv.put(key, "", { expirationTtl: 60 }); 
         return true;
     } catch (error) {
-        console.warn('[VPS Monitor] KV cache delete failed:', error?.message || error);
+        console.warn('[VPS Monitor] KV cache "soft delete" failed:', error?.message || error);
         return false;
     }
 }
 
+/**
+ * Invalidate public caches.
+ * Note: Manual invalidation counts as a KV write now (instead of delete).
+ * In regular reports, we rely on automatic TTL expiration to save quota.
+ */
 async function invalidatePublicCaches(env, nodeId = null) {
     await deleteJsonCache(env, PUBLIC_SNAPSHOT_CACHE_KEY);
     if (nodeId) {
@@ -298,8 +311,11 @@ function buildPublicThemeConfig(settings) {
 
 async function loadVpsSettings(env) {
     await StorageFactory.ensureD1Settings(env);
-    const storageAdapter = await getStorageAdapter(env);
-    let rawSettings = await storageAdapter.get(KV_KEY_SETTINGS);
+    let rawSettings = await SettingsCache.get(env);
+    if (!rawSettings) {
+        const storageAdapter = await getStorageAdapter(env);
+        rawSettings = await storageAdapter.get(KV_KEY_SETTINGS);
+    }
     if (!rawSettings) {
         const kvAdapter = StorageFactory.createAdapter(env, STORAGE_TYPES.KV);
         rawSettings = await kvAdapter.get(KV_KEY_SETTINGS);
@@ -833,17 +849,17 @@ async function pruneAlerts(db) {
 async function fetchReportsForNode(db, nodeId, settings) {
     const cutoff = new Date(getReportRetentionCutoff(settings)).toISOString();
     const result = await db.prepare(
-        'SELECT data FROM vps_reports WHERE node_id = ? AND reported_at >= ? ORDER BY reported_at ASC LIMIT ?'
+        'SELECT data FROM vps_reports WHERE node_id = ? AND reported_at >= ? ORDER BY reported_at DESC LIMIT ?'
     ).bind(nodeId, cutoff, REPORTS_MAX_KEEP).all();
-    return (result.results || []).map(row => JSON.parse(row.data));
+    return (result.results || []).map(row => JSON.parse(row.data)).reverse();
 }
 
 async function fetchNetworkSamples(db, nodeId, settings) {
     const cutoff = new Date(getReportRetentionCutoff(settings)).toISOString();
     const result = await db.prepare(
-        'SELECT data FROM vps_network_samples WHERE node_id = ? AND reported_at >= ? ORDER BY reported_at ASC LIMIT ?'
+        'SELECT data FROM vps_network_samples WHERE node_id = ? AND reported_at >= ? ORDER BY reported_at DESC LIMIT ?'
     ).bind(nodeId, cutoff, REPORTS_MAX_KEEP).all();
-    return (result.results || []).map(row => JSON.parse(row.data));
+    return (result.results || []).map(row => JSON.parse(row.data)).reverse();
 }
 
 async function insertNetworkSample(db, sample) {
@@ -1106,7 +1122,7 @@ function buildInstallScript(reportUrl, node) {
         "MEM_USAGE=\"$(free | awk '/Mem/ {printf \"%.0f\", $3/$2*100}')\"",
         "DISK_USAGE=\"$(df -P / | awk 'NR==2 {gsub(/%/,\"\"); print $5}')\"",
         "LOAD1=\"$(awk '{print $1}' /proc/loadavg)\"",
-        "TRAFFIC_JSON=\"$(cat /proc/net/dev | awk 'NR>2 && $1 != \"lo:\" {rx += $2; tx += $10} END {printf \"{\\\"rx\\\": %d, \\\"tx\\\": %d}\", rx, tx}')\"",
+        "TRAFFIC_JSON=\"$(cat /proc/net/dev | awk 'NR>2 && $1 != \"lo:\" {rx += $2; tx += $10} END {printf \"{\\\"rx\\\": %.0f, \\\"tx\\\": %.0f}\", rx, tx}')\"",
         '',
         'REPORT_INTERVAL=60',
         'REPORT_STORE_INTERVAL=60',
@@ -1627,7 +1643,9 @@ export async function handleVpsReport(request, env) {
         updated_at: updatedAt
     });
 
-    await invalidatePublicCaches(env, node.id);
+    // In regular reports, we rely on the 60s TTL of the KV cache instead of manual invalidation.
+    // This drastically reduces KV write/delete operations to stay within free limits.
+    // Manual invalidation still occurs on node configuration changes.
     await maybePruneReports(db, settings, env);
     return createJsonResponse({ success: true });
 }
@@ -1845,14 +1863,14 @@ export async function handleVpsPublicNodeDetailRequest(request, env) {
     // Fetch network samples - last 500 points for better precision
     const cutoff = new Date(getReportRetentionCutoff(settings)).toISOString();
     const result = await db.prepare(
-        'SELECT data FROM vps_network_samples WHERE node_id = ? AND reported_at >= ? ORDER BY reported_at ASC LIMIT 500'
+        'SELECT data FROM vps_network_samples WHERE node_id = ? AND reported_at >= ? ORDER BY reported_at DESC LIMIT 500'
     ).bind(nodeId, cutoff).all();
     
     const samples = (result.results || []).map(row => {
         const s = JSON.parse(row.data);
         if (s.checks) s.checks = rehydrateCheckNames(s.checks, targets);
         return s;
-    });
+    }).reverse();
 
     const summary = summarizeNode(node, node.lastReport || null, settings);
     // Security: Remove sensitive IP information
