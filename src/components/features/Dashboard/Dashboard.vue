@@ -118,6 +118,10 @@ const {
   manualNodeGroups, renameGroup, deleteGroup // Added group helpers
 } = useManualNodes(markDirty);
 
+const handleSearchTermUpdate = (val) => {
+  searchTerm.value = val;
+};
+
 const {
   profiles, editingProfile, isNewProfile, showProfileModal, showDeleteProfilesModal,
   initializeProfiles, handleProfileToggle, handleAddProfile, handleEditProfile,
@@ -351,8 +355,13 @@ const handleViewLogs = (profileId) => {
   }
 };
 
-const handleProfileReorder = (fromIndex, toIndex) => {
-  // 使用 splice 方法保持响应性,而不是直接赋值
+const handleProfileReorder = (profileId, direction) => {
+  const fromIndex = profiles.value.findIndex(profile => profile.id === profileId || profile.customId === profileId);
+  if (fromIndex === -1) return;
+
+  const toIndex = direction === 'up' ? fromIndex - 1 : fromIndex + 1;
+  if (toIndex < 0 || toIndex >= profiles.value.length) return;
+
   const [item] = profiles.value.splice(fromIndex, 1);
   profiles.value.splice(toIndex, 0, item);
   markDirty();
@@ -387,8 +396,8 @@ import SavePrompt from '../../ui/SavePrompt.vue';
     />
 
     <!-- Main Grid -->
-    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 md:gap-8 items-start">
-      <div class="lg:col-span-2 md:col-span-2 space-y-12">
+    <div class="grid grid-cols-1 gap-6 items-start lg:gap-7 xl:grid-cols-3 xl:gap-8">
+      <div class="space-y-8 lg:space-y-9 xl:col-span-2">
         <!-- Subscription Panel -->
         <SubscriptionPanel :subscriptions="subscriptions" :paginated-subscriptions="paginatedSubscriptions"
           :current-page="subsCurrentPage" :total-pages="subsTotalPages" :is-sorting="isSortingSubs"
@@ -404,9 +413,10 @@ import SavePrompt from '../../ui/SavePrompt.vue';
           :current-page="manualNodesCurrentPage" :total-pages="manualNodesTotalPages" :is-sorting="isSortingNodes"
           :search-term="searchTerm" :view-mode="manualNodeViewMode" :active-group-filter="activeGroupFilter"
           :groups="manualNodeGroups"
+          :compact-grid="true"
           @add="handleAddNode" @delete="handleDeleteNodeWithCleanup"
           @edit="(id) => handleEditNode(manualNodes.find(n => n.id === id))" @change-page="changeManualNodesPage"
-          @update:search-term="newVal => searchTerm.value = newVal" @update:view-mode="setViewMode"
+          @update:search-term="handleSearchTermUpdate" @update:view-mode="setViewMode"
           @toggle-sort="isSortingNodes = !isSortingNodes" @mark-dirty="markDirty" @auto-sort="handleAutoSortNodes"
           @deduplicate="handleDeduplicateNodes" @import="showSubscriptionImportModal = true"
           @delete-all="showDeleteNodesModal = true" @reorder="reorderManualNodes" @set-group-filter="setGroupFilter"
@@ -417,9 +427,9 @@ import SavePrompt from '../../ui/SavePrompt.vue';
       </div>
 
       <!-- Right Column -->
-      <div class="lg:col-span-1 md:col-span-2 space-y-8">
-        <RightPanel :config="config" :profiles="profiles" @qrcode="(url, title) => { qrCodeUrl = url; qrCodeTitle = title; showQRCodeModal = true; }" />
-        <ProfilePanel :profiles="profiles" @add="handleAddProfile" @edit="handleEditProfile"
+      <div class="space-y-6 lg:space-y-7 xl:col-span-1">
+        <RightPanel :config="config" :profiles="profiles" :compact="true" @qrcode="(url, title) => { qrCodeUrl = url; qrCodeTitle = title; showQRCodeModal = true; }" />
+        <ProfilePanel :profiles="profiles" :compact="true" @add="handleAddProfile" @edit="handleEditProfile"
           @delete="handleDeleteProfile" @deleteAll="showDeleteProfilesModal = true" @toggle="handleProfileToggle"
           @open-copy="handleOpenCopy" @copyLink="copyProfileLink" @copyClashLink="copyClashLink" @preview="handlePreviewProfile" @viewLogs="handleViewLogs" @reorder="handleProfileReorder" 
           @qrcode="(id) => handleQRCode(id, 'profile')" />
